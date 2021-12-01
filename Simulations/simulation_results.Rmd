@@ -1,0 +1,1988 @@
+---
+title: "Simulation Results"
+author: "Justin M. Leach"
+header-includes:
+  - \usepackage{amsmath}
+  - \usepackage{bm}
+  - \usepackage{hyperref}
+  - \hypersetup{colorlinks=true, linkcolor=blue, filecolor=magenta, urlcolor=cyan, citecolor=red}
+  - \DeclareMathOperator{\diag}{diag}
+  - \DeclareMathOperator{\E}{E}
+  - \DeclareMathOperator{\var}{var}
+  - \DeclareMathOperator{\logit}{logit}
+  - \DeclareMathOperator{\PPV}{PPV}
+  - \DeclareMathOperator{\SN}{SN}
+  - \DeclareMathOperator{\F}{F}
+output:
+  pdf_document:
+    number_sections: true
+    keep_tex: true
+    citation_package: natbib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# What is contained herein?
+
+We ran a set of simulations inspired by the original SSL paper. Specifically, we generate a training set with $N = 300$ subjects and a test set with $N = 100$ subjects. The design vector $\bm{X}$ contains 1,000 predictors, which are generated from the multivariate normal distribution with mean zero and unit variance, but with a block correlation structure consisting of 20 blocks of 50 predictors, where within each block the predictors have a 0.90 correlation with each other. A total of 6 of these predictors are given non-zero values, specifically the predictors with indices, 1, 51, 101, 151, 201, 251. We examine 3 effect size scenarios. Each scenario treats one group as a reference, i.e., all its parameters are 0. The second and third groups are given non-zero parameter values at the appropriate indices. The settings are as follows:
+
+(1) Group 2: $\beta_0 = -0.15$, $\beta = 0.0075$; Group 3: $\beta_0 = -0.5$, $\beta = 0.015$.
+(2) Group 2: $\beta_0 = -0.15$, $\beta = 0.0125$; Group 3: $\beta_0 = -0.5$, $\beta = 0.025$.
+(3) Group 2: $\beta_0 = -0.15$, $\beta = 0.025$; Group 3: $\beta_0 = -0.5$, $\beta = 0.05$.
+
+These scenarios generate imbalanced data, where group 1 is most common, group 2 secondmost common, and group 3 least common. 
+
+```{r, echo=FALSE}
+sc1_bal <- data.frame(
+  Group_1 = c(121.9358, 8.334793, 40.5122, 4.802256),
+  Group_2 = c(103.4392, 8.187925, 34.6162, 4.692814),
+  Group_3 = c(74.6250, 7.292696, 24.8716, 4.388595)
+)
+row.names(sc1_bal) <- c("Freq. (Mean)",
+                        "Freq. (SD)",
+                        "Percent (Mean)",
+                        "Percent (SD)")
+
+sc2_bal <- data.frame(
+  Group_1 = c(122.2284, 8.337874, 40.6164, 4.902944),
+  Group_2 = c(101.7494, 8.155458, 34.0422, 4.652822),
+  Group_3 = c(76.0222, 7.401585, 25.3414, 4.391299)
+)
+row.names(sc2_bal) <- c("Freq. (Mean)",
+                        "Freq. (SD)",
+                        "Percent (Mean)",
+                        "Percent (SD)")
+
+sc3_bal <- data.frame(
+  Group_1 = c(123.6674, 8.469328, 41.0828, 4.859575),
+  Group_2 = c(94.8234, 7.988403, 31.7212, 4.666458),
+  Group_3 = c(81.5092, 7.647275, 27.1960, 4.523060)
+)
+row.names(sc3_bal) <- c("Freq. (Mean)",
+                        "Freq. (SD)",
+                        "Percent (Mean)",
+                        "Percent (SD)")
+
+knitr::kable(
+  sc1_bal,
+  digits = 2,
+  caption = "Sample Balance in Scenario 1"
+)
+
+knitr::kable(
+  sc2_bal,
+  digits = 2,
+  caption = "Sample Balance in Scenario 2"
+)
+
+knitr::kable(
+  sc3_bal,
+  digits = 2,
+  caption = "Sample Balance in Scenario 3"
+)
+```
+
+
+The training set is used to perform 5-fold cross validation to select optimal penalty parameters for the elastic net ($\alpha = 0.5$), lasso ($\alpha = 1$), and spike-and-slab elastic net, and spike-and-slab lasso. That is, $\lambda = s_0 = s_1$ for the traditional models and a spike scale, $s_0$, and slab scale, $s_1$, for the spike-and-slab models. For the traditional models, the range of $\lambda$ is chosen internally by the `R` package `glmnet`. A grid of values is preselected for the spike-and-slab models, $s_0 = \{0.01, 0.02, 0.03, \dots, 0.1 \}$ and $s1 = \{1, 2, 3, 4\}$, which are then fit with the `R` package `ssnet`. We then use the selected penalty parameters to fit the model on the entire training data. This model is then applied to predict the observations in the test data and calculate measures of model fitness.
+
+```{r,message=FALSE, echo=FALSE}
+library(tidyverse)
+cbp <- c("#999999", # grey [1]
+         "#000000", # black [2]
+         "#E69F00", # orange [3]
+         "#56B4E9", # light blue [4]
+         "#009E73", # green [5]
+         "#F0E442", # yellow [6]
+         "#0072B2", # blue [7]
+         "#D55E00", # red-orange [8]
+         "#CC79A7" # pink [9]
+         )
+```
+
+# Combining files
+
+As usual, simulation analyses take too long, so we break them up into separate (array) jobs on UAB's Cheaha. The following function puts them back together again.
+
+```{r}
+combine_files <- function(
+  path = "C:/Users/cotto/Documents/Publications/multinomial models in R/simulations/results/",
+  files, # names of files to combine
+  rename_sims = TRUE, # When combining files simulation indices repeat, so fix it here
+  number_outcomes = 3, #
+  outfile = NULL # specify file name to write results to path directory
+) {
+  
+  fit_time <- NULL
+  model_fitness <- NULL
+  param_est <- NULL
+  for (i in 1:length(files)) {
+    
+    results_i <- readRDS(
+      paste0(path, files[i])
+    )
+    
+    if (rename_sims == TRUE) {
+      if (i == 1) {
+        sim_num_i <- 1:nrow(results_i$model_fitness)
+      } else {
+        sim_num_i <- max(sim_num_i) + 1:nrow(results_i$model_fitness)
+      }
+      print(c(min(sim_num_i), max(sim_num_i)))
+      # print(length(sim_num_i))
+    }
+    
+    fit_time <- rbind(
+      fit_time,
+      results_i$fit_time
+    )
+    
+    if (rename_sims == TRUE) {
+      # print(length(results_i$model_fitness$sim.num))
+      results_i$model_fitness$sim.num <- sim_num_i
+      cat("Model fitness sim IDs renamed for file ", i, "\n")
+    }
+    model_fitness <- rbind(
+      model_fitness,
+      results_i$model_fitness
+    ) 
+    
+    if (rename_sims == TRUE) {
+      results_i$param_est$sim.num <- rep(
+        x = sim_num_i,
+        each = number_outcomes
+      )
+      cat("Parameter sim IDs renamed for file ", i, "\n")
+    }
+    
+    param_est <- rbind(
+      param_est,
+      results_i$param_est
+    ) 
+  }
+  out <- list(
+    fit_time = apply(fit_time[, 1:3], 2, sum),
+    model_fitness = model_fitness,
+    param_est = param_est
+  )
+  if (is.null(outfile) == FALSE) {
+    saveRDS(
+      out,
+      file = paste0(path, outfile)
+    )
+  }
+  return(out)
+}
+```
+
+## B6_BV0075015
+
+```{r, eval=FALSE}
+results_lasso_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 <- combine_files(
+  files = c(
+    "results_lasso_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_1.RDS",
+    "results_lasso_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_2.RDS",
+    "results_lasso_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_3.RDS",
+    "results_lasso_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_4.RDS",
+    "results_lasso_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_5.RDS"
+  ),
+  outfile = "results_lasso_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5.RDS"
+)
+
+results_en_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 <- combine_files(
+  files = c(
+    "results_en_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_1.RDS",
+    "results_en_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_2.RDS",
+    "results_en_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_3.RDS",
+    "results_en_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_4.RDS",
+    "results_en_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_5.RDS"
+  ),
+  outfile = "results_en_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5.RDS"
+)
+
+results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 <- combine_files(
+  files = c(
+    "results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_1.RDS",
+    "results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_2.RDS",
+    "results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_3.RDS",
+    "results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_4.RDS",
+    "results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_5.RDS",
+    "results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_6.RDS",
+    "results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_7.RDS",
+    "results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_8.RDS",
+    "results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_9.RDS",
+    "results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_10.RDS",
+    "results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_11.RDS",
+    "results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_12.RDS",
+    "results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_13.RDS",
+    "results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_14.RDS",
+    "results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_15.RDS",
+    "results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_16.RDS",
+    "results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_17.RDS",
+    "results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_18.RDS",
+    "results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_19.RDS",
+    "results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_20.RDS",
+    "results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_21.RDS",
+    "results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_22.RDS",
+    "results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_23.RDS",
+    "results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_24.RDS",
+    "results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_25.RDS"
+  ),
+  outfile = "results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5.RDS"
+)
+
+results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 <- combine_files(
+  files = c(
+    "results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_1.RDS",
+    "results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_2.RDS",
+    "results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_3.RDS",
+    "results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_4.RDS",
+    "results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_5.RDS",
+    "results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_6.RDS",
+    "results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_7.RDS",
+    "results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_8.RDS",
+    "results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_9.RDS",
+    "results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_10.RDS",
+    "results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_11.RDS",
+    "results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_12.RDS",
+    "results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_13.RDS",
+    "results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_14.RDS",
+    "results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_15.RDS",
+    "results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_16.RDS",
+    "results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_17.RDS",
+    "results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_18.RDS",
+    "results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_19.RDS",
+    "results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_20.RDS",
+    "results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_21.RDS",
+    "results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_22.RDS",
+    "results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_23.RDS",
+    "results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_24.RDS",
+    "results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_25.RDS"
+  ),
+  outfile = "results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5.RDS"
+)
+```
+
+## B6_BV012025
+
+```{r, eval=FALSE}
+results_lasso_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 <- combine_files(
+  files = c(
+    "results_lasso_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_1.RDS",
+    "results_lasso_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_2.RDS",
+    "results_lasso_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_3.RDS",
+    "results_lasso_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_4.RDS",
+    "results_lasso_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_5.RDS"
+  ),
+  outfile = "results_lasso_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5.RDS"
+)
+
+results_en_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 <- combine_files(
+  files = c(
+    "results_en_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_1.RDS",
+    "results_en_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_2.RDS",
+    "results_en_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_3.RDS",
+    "results_en_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_4.RDS",
+    "results_en_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_5.RDS"
+  ),
+  outfile = "results_en_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5.RDS"
+)
+
+results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 <- combine_files(
+  files = c(
+    "results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_1.RDS",
+    "results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_2.RDS",
+    "results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_3.RDS",
+    "results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_4.RDS",
+    "results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_5.RDS",
+    "results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_6.RDS",
+    "results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_7.RDS",
+    "results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_8.RDS",
+    "results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_9.RDS",
+    "results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_10.RDS",
+    "results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_11.RDS",
+    "results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_12.RDS",
+    "results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_13.RDS",
+    "results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_14.RDS",
+    "results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_15.RDS",
+    "results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_16.RDS",
+    "results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_17.RDS",
+    "results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_18.RDS",
+    "results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_19.RDS",
+    "results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_20.RDS",
+    "results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_21.RDS",
+    "results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_22.RDS",
+    "results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_23.RDS",
+    "results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_24.RDS",
+    "results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_25.RDS"
+  ),
+  outfile = "results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5.RDS"
+)
+
+results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 <- combine_files(
+  files = c(
+    "results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_1.RDS",
+    "results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_2.RDS",
+    "results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_3.RDS",
+    "results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_4.RDS",
+    "results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_5.RDS",
+    "results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_6.RDS",
+    "results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_7.RDS",
+    "results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_8.RDS",
+    "results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_9.RDS",
+    "results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_10.RDS",
+    "results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_11.RDS",
+    "results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_12.RDS",
+    "results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_13.RDS",
+    "results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_14.RDS",
+    "results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_15.RDS",
+    "results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_16.RDS",
+    "results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_17.RDS",
+    "results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_18.RDS",
+    "results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_19.RDS",
+    "results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_20.RDS",
+    "results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_21.RDS",
+    "results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_22.RDS",
+    "results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_23.RDS",
+    "results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_24.RDS",
+    "results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_25.RDS"
+  ),
+  outfile = "results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5.RDS"
+)
+```
+
+## B6_BV025050
+
+```{r, eval=FALSE}
+results_lasso_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 <- combine_files(
+  files = c(
+    "results_lasso_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_1.RDS",
+    "results_lasso_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_2.RDS",
+    "results_lasso_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_3.RDS",
+    "results_lasso_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_4.RDS",
+    "results_lasso_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_5.RDS"
+  ),
+  outfile = "results_lasso_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5.RDS"
+)
+
+results_en_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 <- combine_files(
+  files = c(
+    "results_en_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_1.RDS",
+    "results_en_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_2.RDS",
+    "results_en_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_3.RDS",
+    "results_en_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_4.RDS",
+    "results_en_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_5.RDS"
+  ),
+  outfile = "results_en_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5.RDS"
+)
+
+results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 <- combine_files(
+  files = c(
+    "results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_1.RDS",
+    "results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_2.RDS",
+    "results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_3.RDS",
+    "results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_4.RDS",
+    "results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_5.RDS",
+    "results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_6.RDS",
+    "results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_7.RDS",
+    "results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_8.RDS",
+    "results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_9.RDS",
+    "results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_10.RDS",
+    "results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_11.RDS",
+    "results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_12.RDS",
+    "results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_13.RDS",
+    "results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_14.RDS",
+    "results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_15.RDS",
+    "results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_16.RDS",
+    "results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_17.RDS",
+    "results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_18.RDS",
+    "results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_19.RDS",
+    "results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_20.RDS",
+    "results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_21.RDS",
+    "results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_22.RDS",
+    "results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_23.RDS",
+    "results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_24.RDS",
+    "results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_25.RDS"
+  ),
+  outfile = "results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5.RDS"
+)
+
+results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 <- combine_files(
+  files = c(
+    "results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_1.RDS",
+    "results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_2.RDS",
+    "results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_3.RDS",
+    "results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_4.RDS",
+    "results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_5.RDS",
+    "results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_6.RDS",
+    "results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_7.RDS",
+    "results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_8.RDS",
+    "results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_9.RDS",
+    "results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_10.RDS",
+    "results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_11.RDS",
+    "results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_12.RDS",
+    "results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_13.RDS",
+    "results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_14.RDS",
+    "results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_15.RDS",
+    "results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_16.RDS",
+    "results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_17.RDS",
+    "results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_18.RDS",
+    "results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_19.RDS",
+    "results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_20.RDS",
+    "results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_21.RDS",
+    "results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_22.RDS",
+    "results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_23.RDS",
+    "results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_24.RDS",
+    "results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_25.RDS"
+  ),
+  outfile = "results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5.RDS"
+)
+```
+
+
+# Summary function
+
+The following function automates useful summaries.
+
+```{r}
+summary_function_A <- function(
+  path = "C:/Users/cotto/Documents/Publications/multinomial models in R/simulations/results/",
+  simulations_desired = 5000, # used when calculating total times required for all simulations
+  files,
+  model_names = c("Lasso", "EN", "SSL"),
+  spatial = TRUE, # if true use spatial arguments; otherwise use non-spatial arguments
+  # the following are for spatial settings
+  im.wh = 32, # image (X) width/height 
+  nzb.wh = 6, # non-zero parameter area width/height
+  row.index = 5, col.index = 5, B0 = 0, B.values = 0.01, # as in sim2Dpredictr::beta_builder
+  index.type = "ellipse",  # as in sim2Dpredictr::beta_builder
+  # the following are for non-spatial settings
+  p = 1000, # how many predictors?
+  b.indices, # indices for non-zero predictors
+  print.progress = FALSE # 
+  
+  
+) {
+  
+  if (length(files) != length(model_names)) {
+    stop("Number of files and number of model names must be equal.")
+  }
+  
+  # hold fit times
+  fit_time_avg <- NULL
+  
+  # hold model fitness summaries
+  model_fitness_avg <- NULL
+  model_fitness_med <- NULL
+  model_fitness_sd <- NULL
+  model_fitness_iqr <- NULL
+  
+  # hold raw values for FP & Power
+  sfp_out <- NULL
+  
+  # hold FP & Power summaries
+  sfp_avg <- NULL
+  sfp_med <- NULL
+  sfp_sd <- NULL
+  sfp_iqr <- NULL
+  
+  # hold inclusion probabilities
+  prob_rej <- NULL
+  
+  if (spatial == TRUE) {
+    # should match the simulation scenario
+  B <- sim2Dpredictr::beta_builder(
+    im.res = c(im.wh, im.wh),
+    row.index = row.index, col.index = col.index,
+    B0 = B0, B.values = B.values, 
+    index.type = index.type,
+    h = nzb.wh, w = nzb.wh
+  )
+  
+  # convert to 1 = Non-zero-valued and 0 = zero-valued parameter
+  b.binary <- ifelse(B$B[-1] != 0, 1, 0)
+  true.pred <- paste0("x", B$Truth.Indices)
+  } else {
+    b.binary = rep(0, p)
+    b.binary[b.indices] <- 1
+    true.pred <- paste0("x", b.indices)
+  }
+  
+  # rej <- list()
+  # sfp <- list()
+  for (i in 1:length(files)) {
+    
+    # load results
+    results_i <- readRDS(
+      paste0(path, files[[i]])
+    )
+    
+    # how many simulations?
+    M <- length(unique(results_i$param_est$sim.num))
+    
+    # How long to fit models
+    fit_time_avg_i <- dplyr::bind_cols(
+      model = model_names[i],
+      sec_per_sim = results_i$fit_time[3] / nrow(results_i$model_fitness),
+      hours_required = simulations_desired * results_i$fit_time[3] / nrow(results_i$model_fitness) / 60 / 60
+      )
+    fit_time_avg <- dplyr::bind_rows(
+      fit_time_avg,
+      fit_time_avg_i
+    )
+    
+    if (print.progress == TRUE) {
+      cat("Model fit times for ", model_names[i], " complete \n")
+    }
+    
+    # model fitness 
+    model_fitness_avg_i <- dplyr::bind_cols(
+      model = model_names[i],
+      purrr::map_df(results_i$model_fitness |> dplyr::select(-sim.num), mean, na.rm = TRUE)
+      )
+    model_fitness_avg <- dplyr::bind_rows(
+      model_fitness_avg,
+      model_fitness_avg_i
+    )
+    model_fitness_med_i <- dplyr::bind_cols(
+      model = model_names[i],
+      purrr::map_df(results_i$model_fitness |> dplyr::select(-sim.num), median, na.rm = TRUE)
+    )
+    model_fitness_med <- dplyr::bind_rows(
+      model_fitness_med,
+      model_fitness_med_i
+    )
+    model_fitness_sd_i <- dplyr::bind_cols(
+      model = model_names[i],
+      purrr::map_df(results_i$model_fitness |> dplyr::select(-sim.num), sd, na.rm = TRUE)
+    )
+    model_fitness_sd <- dplyr::bind_rows(
+      model_fitness_sd,
+      model_fitness_sd_i
+    )
+    model_fitness_iqr_i <- dplyr::bind_cols(
+      model = model_names[i],
+      purrr::map_df(results_i$model_fitness |> dplyr::select(-sim.num), IQR, na.rm = TRUE)
+    )
+    model_fitness_iqr <- dplyr::bind_rows(
+      model_fitness_iqr,
+      model_fitness_iqr_i
+    )
+    
+    if (print.progress == TRUE) {
+      cat("Model fitness for ", model_names[i], " complete. \n")
+    }
+    
+    # obtain estimates from each simulation
+    # obtain indices for predictors with non-zero estimates
+    rej_i <- NULL
+    # Obtain FDP & Power 
+    sfp_i <- NULL
+    for (m in 1:M) {
+      
+      if (!(m %in% results_i$param_est$sim.num)) {
+        cat("Simulation ", m, " for model ", model_names[i], "is missing. \n")
+      } else {
+        # obtain indices for non-zero estimates in results i, simulation m
+        # can use outcome == 1 since grouped parameters by predictor
+        rej_im <- data.frame(
+          ifelse(
+            results_i$param_est |> 
+              dplyr::filter(outcome == 1, sim.num == m) |>
+              dplyr::select(-sim.num, -s0, -s1, -outcome, -x0) != 0,
+            1, 0
+          )
+        )
+        if (print.progress == TRUE) {
+          cat("Non-zero parameter indices for ", model_names[i], " for sim ", m, " complete. \n")
+        }
+        
+        # false positive rates & power for results i, simulation m
+        sfp_im <- sim2Dpredictr::sample_FP_Power(
+          rejections = as.numeric(rej_im),
+          B = b.binary,
+          B.incl.B0 = FALSE
+        )
+        
+        sfp_i <- dplyr::bind_rows(
+          sfp_i,
+          sfp_im
+        )
+        
+        rej_im <- dplyr::tibble(rej_im)
+        
+        rej_i <- dplyr::bind_rows(
+          rej_i,
+          rej_im
+        )
+      }
+      
+      if (print.progress == TRUE) {
+        cat("FP and Power for ", model_names[i], " for sim ", m, " complete. \n")
+      }
+    }
+    # rej_i <- data.frame(rej_i)
+    # print(rej_i[, 1:10])
+    prob_rej_i <- dplyr::bind_cols(
+      model = model_names[i],
+      purrr::map_df(.x = rej_i, .f = mean)
+    )
+    prob_rej <- dplyr::bind_rows(
+      prob_rej,
+      prob_rej_i
+    )
+    sfp_avg_i <- dplyr::bind_cols(
+      model = model_names[i],
+      purrr::map_df(.x = sfp_i, .f = mean, na.rm = TRUE)
+    )
+    sfp_avg <- dplyr::bind_rows(
+      sfp_avg,
+      sfp_avg_i
+    )
+    sfp_med_i <- dplyr::bind_cols(
+      model = model_names[i],
+      purrr::map_df(.x = sfp_i, .f = median, na.rm = TRUE)
+    )
+    sfp_med <- dplyr::bind_rows(
+      sfp_med,
+      sfp_med_i
+    )
+    sfp_sd_i <- dplyr::bind_cols(
+      model = model_names[i],
+      purrr::map_df(.x = sfp_i, .f = sd, na.rm = TRUE)
+    )
+    sfp_sd <- dplyr::bind_rows(
+      sfp_sd,
+      sfp_sd_i
+    )
+    sfp_iqr_i <- dplyr::bind_cols(
+      model = model_names[i],
+      purrr::map_df(.x = sfp_i, .f = IQR, na.rm = TRUE)
+    )
+    sfp_iqr <- dplyr::bind_rows(
+      sfp_iqr,
+      sfp_iqr_i
+    )
+    
+    sfp_out_i <- cbind(model = model_names[i], sfp_i)
+    sfp_out <- dplyr::bind_rows(
+      sfp_out,
+      sfp_out_i
+    )
+    
+    # rej[[i]] <- data.frame(dplyr::bind_cols(model = model_names[i], rej_i))
+    # sfp[[i]] <- dplyr::bind_cols(model = model_names[i], sfp_i)
+  }
+  rownames(fit_time_avg) <- NULL
+  # names(rej) <- model_names
+  # rej_final <- dplyr::bind_rows(rej)
+  # names(sfp) <- model_names
+  # sfp_final <- dplyr::bind_rows(sfp)
+  
+  return(
+    list(
+      fit_time_avg = data.frame(fit_time_avg),
+      model_fitness_avg = data.frame(model_fitness_avg),
+      model_fitness_sd = data.frame(model_fitness_sd),
+      model_fitness_med = data.frame(model_fitness_med),
+      model_fitness_iqr = data.frame(model_fitness_iqr),
+      FP_Power_avg = data.frame(sfp_avg),
+      FP_Power_sd = data.frame(sfp_sd),
+      FP_Power_med = data.frame(sfp_med),
+      FP_Power_iqr = data.frame(sfp_iqr),
+      Prob_Included = data.frame(prob_rej),
+      Raw_out = data.frame(sfp_out)
+      # fpr_power = sfp_final, 
+      # nonzero_est = rej_final
+      )
+  )
+}
+```
+
+For false positives and power we need locations of non-zero parameters. While the parameter values change in each of the 3 scenarios examined here, the number of non-zero parameters and the number of total predictors is the same, so `b.binary` can be reused. 
+
+```{r}
+# how many parameters?
+p <- 1000
+
+# non-zero locations
+nzl <- c(1, 51, 101, 151, 201, 251)
+
+bb.ns <- rep(0, p)
+bb.ns[nzl] <- 1
+tp.ns <- paste0("x", nzl)
+```
+
+## B6_BV0075015 Summary (ALL)
+
+```{r, eval=FALSE, echo=FALSE}
+results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 <- summary_function_A(
+  files = c(
+    "results_lasso_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5.RDS",
+    "results_en_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5.RDS",
+    "results_ssl_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5.RDS",
+    "results_ssen_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5.RDS"),
+  spatial = FALSE,
+  model_names = c("Lasso", "EN", "SSL", "SSEN"),
+  p = 1000,
+  b.indices = nzl,
+  print.progress = T
+)
+
+saveRDS(
+  results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5,
+  "simulations/results/results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_unsmry.RDS"
+)
+
+pr_param_df_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 <- data.frame(
+  Model = c(rep("Lasso", 1000),
+            rep("EN", 1000),
+            rep("SSL", 1000),
+            rep("SSEN", 1000)),
+  x.label = colnames(results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5$Prob_Included[-1]),
+  Probability = c(
+    t(results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5$Prob_Included |> filter(model == "Lasso") |>
+        select(-model)),
+    t(results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5$Prob_Included |> filter(model == "EN") |>
+        select(-model)),
+    t(results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5$Prob_Included |> filter(model == "SSL") |>
+        select(-model)),
+    t(results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5$Prob_Included |> filter(model == "SSEN") |>
+        select(-model))
+  )
+) |>
+  mutate(
+    Relevance = case_when(
+      x.label %in% tp.ns ~ "Relevant",
+      !(x.label %in% tp.ns) ~ "Irrelevant"
+    )
+  )
+
+results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5$pr_param_df <-
+  pr_param_df_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5
+
+saveRDS(
+  results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5,
+  "simulations/results/results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5.RDS"
+)
+```
+
+```{r, echo=FALSE}
+results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 <- readRDS(
+  "C:/Users/cotto/Documents/Publications/multinomial models in R/simulations/results/results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5.RDS"
+)
+
+knitr::kable(
+  results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5$model_fitness_avg,
+  caption = "Mean Model Fitness: X1k_B6_BV0075015",
+  digits = 4
+)
+
+knitr::kable(
+  results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5$model_fitness_sd,
+  caption = "SD Model Fitness: X1k_B6_BV0075015",
+  digits = 4
+)
+
+knitr::kable(
+  results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5$model_fitness_med,
+  caption = "Median Model Fitness: X1k_B6_BV0075015",
+  digits = 4
+)
+
+knitr::kable(
+  results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5$model_fitness_iqr,
+  caption = "IQR Model Fitness: X1k_B6_BV0075015",
+  digits = 4
+)
+
+knitr::kable(
+  results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5$FP_Power_avg,
+  caption = "Mean False Positive Rates and Power: X1k_B6_BV0075015",
+  digits = 4
+)
+
+knitr::kable(
+  results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5$FP_Power_sd,
+  caption = "SD False Positive Rates and Power: X1k_B6_BV0075015",
+  digits = 4
+)
+
+knitr::kable(
+  results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5$FP_Power_med,
+  caption = "Median False Positive Rates and Power: X1k_B6_BV0075015",
+  digits = 4
+)
+
+knitr::kable(
+  results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5$FP_Power_iqr,
+  caption = "IQR False Positive Rates and Power: X1k_B6_BV0075015",
+  digits = 4
+)
+
+ggplot(data = results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5$pr_param_df, 
+       mapping = aes(x = x.label, 
+                     y = Probability,
+                     color = Relevance)) +
+  geom_point(alpha = 0.75) +
+  facet_wrap(~Model)
+
+pr_param_df_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 <- results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5$pr_param_df |> 
+  group_by(Model, Relevance) |>
+  nest() |>
+  mutate(
+    Mean = map(.x = data, .f = function(x) mean(x$Probability)),
+    SD = map(.x = data, .f = function(x) sd(x$Probability))
+    ) |>
+  unnest(c(Mean, SD))
+
+relevant_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 <- results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5$pr_param_df |> filter(Relevance == "Relevant")
+
+knitr::kable(
+  data.frame(
+    Model = c("Lasso", "EN", "SSL", "SSEN"),
+    x1 = relevant_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x1") |>
+      select(Probability),
+    x51 = relevant_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x51")|>
+      select(Probability),
+    x101 = relevant_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x101")|>
+      select(Probability),
+    x151 = relevant_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x151")|>
+      select(Probability),
+    x201 = relevant_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x201")|>
+      select(Probability),
+    x251 = relevant_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x251")|>
+      select(Probability)
+  ),
+  caption = "Mean Probability of Inclusion for True Non-zero Paramters",
+  col.names = c("Model", "X1", "X51", "X101", "X151", "X201", "X251")
+)
+
+
+knitr::kable(
+  pr_param_df_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 |> 
+    select(-data) |>
+    arrange(Relevance),
+  caption = "Probability of Inclusion for Relevant/Irrelevant Parameters: X1k_B6_BV0075015",
+  digits = 4
+)
+
+```
+
+## B6_BV0075015 Summary (Reduced for Manuscript)
+
+```{r, echo=FALSE}
+results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 <- readRDS(
+  "C:/Users/cotto/Documents/Publications/multinomial models in R/simulations/results/results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5.RDS"
+)
+
+knitr::kable(
+  bind_cols(
+    results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5$model_fitness_avg |>
+    dplyr::select(model, s0, s1, deviance),
+    results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5$FP_Power_avg |>
+      select(FDP, Power)
+  ),
+  caption = "Mean Model Fitness: X1k_B6_BV0075015",
+  digits = 4
+)
+
+# xtable::xtable(
+#   bind_cols(
+#     results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5$model_fitness_avg |>
+#     dplyr::select(model, s0, s1, deviance),
+#     results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5$FP_Power_avg |>
+#       select(FDP, Power)
+#   ),
+#   caption = "Mean Model Fitness: X1k_B6_BV0075015",
+#   digits = 4
+# )
+
+pr_param_df_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 <- results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5$pr_param_df |> 
+  group_by(Model, Relevance) |>
+  nest() |>
+  mutate(
+    Mean = map(.x = data, .f = function(x) mean(x$Probability)),
+    SD = map(.x = data, .f = function(x) sd(x$Probability))
+    ) |>
+  unnest(c(Mean, SD))
+
+relevant_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 <- results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5$pr_param_df |> filter(Relevance == "Relevant")
+
+knitr::kable(
+  data.frame(
+    Model = c("Lasso", "EN", "SSL", "SSEN"),
+    x1 = relevant_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x1") |>
+      select(Probability),
+    x51 = relevant_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x51")|>
+      select(Probability),
+    x101 = relevant_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x101")|>
+      select(Probability),
+    x151 = relevant_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x151")|>
+      select(Probability),
+    x201 = relevant_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x201")|>
+      select(Probability),
+    x251 = relevant_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x251")|>
+      select(Probability)
+  ),
+  caption = "Mean Probability of Inclusion for True Non-zero Paramters",
+  col.names = c("Model", "X1", "X51", "X101", "X151", "X201", "X251")
+)
+
+# xtable::xtable(
+#   data.frame(
+#     Model = c("Lasso", "EN", "SSL", "SSEN"),
+#     x1 = relevant_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 |> 
+#       filter(x.label == "x1") |>
+#       select(Probability),
+#     x51 = relevant_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 |> 
+#       filter(x.label == "x51")|>
+#       select(Probability),
+#     x101 = relevant_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 |> 
+#       filter(x.label == "x101")|>
+#       select(Probability),
+#     x151 = relevant_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 |> 
+#       filter(x.label == "x151")|>
+#       select(Probability),
+#     x201 = relevant_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 |> 
+#       filter(x.label == "x201")|>
+#       select(Probability),
+#     x251 = relevant_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 |> 
+#       filter(x.label == "x251")|>
+#       select(Probability)
+#   ),
+#   caption = "Mean Probability of Inclusion for True Non-zero Paramters",
+#   digits = 4
+# )
+
+```
+
+## B6_B012025 Summary
+
+```{r, eval=FALSE, echo=FALSE}
+results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 <- summary_function_A(
+  files = c(
+    "results_lasso_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5.RDS",
+    "results_en_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5.RDS",
+    "results_ssl_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5.RDS",
+    "results_ssen_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5.RDS"),
+  spatial = FALSE,
+  model_names = c("Lasso", "EN", "SSL", "SSEN"),
+  p = 1000,
+  b.indices = nzl,
+  print.progress = T
+)
+
+saveRDS(
+  results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5,
+  "C:/Users/cotto/Documents/Publications/multinomial models in R/simulations/results/results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_unsmry.RDS"
+)
+
+pr_param_df_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 <- data.frame(
+  Model = c(rep("Lasso", 1000),
+            rep("EN", 1000),
+            rep("SSL", 1000),
+            rep("SSEN", 1000)),
+  x.label = colnames(results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5$Prob_Included[-1]),
+  Probability = c(
+    t(results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5$Prob_Included |> filter(model == "Lasso") |>
+        select(-model)),
+    t(results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5$Prob_Included |> filter(model == "EN") |>
+        select(-model)),
+    t(results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5$Prob_Included |> filter(model == "SSL") |>
+        select(-model)),
+    t(results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5$Prob_Included |> filter(model == "SSEN") |>
+        select(-model))
+  )
+) |>
+  mutate(
+    Relevance = case_when(
+      x.label %in% tp.ns ~ "Relevant",
+      !(x.label %in% tp.ns) ~ "Irrelevant"
+    )
+  )
+
+results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5$pr_param_df <-
+  pr_param_df_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5
+
+saveRDS(
+  results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5,
+  "C:/Users/cotto/Documents/Publications/multinomial models in R/simulations/results//results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5.RDS"
+)
+```
+
+```{r, echo=FALSE}
+results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 <- readRDS(
+  "C:/Users/cotto/Documents/Publications/multinomial models in R/simulations/results/results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5.RDS"
+)
+
+knitr::kable(
+  results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5$model_fitness_avg,
+  caption = "Mean Model Fitness: X1k_B6_BV012025",
+  digits = 4
+)
+
+knitr::kable(
+  results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5$model_fitness_sd,
+  caption = "SD Model Fitness: X1k_B6_BV012025",
+  digits = 4
+)
+
+knitr::kable(
+  results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5$model_fitness_med,
+  caption = "Median Model Fitness: X1k_B6_BV012025",
+  digits = 4
+)
+
+knitr::kable(
+  results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5$model_fitness_iqr,
+  caption = "IQR Model Fitness: X1k_B6_BV012025",
+  digits = 4
+)
+
+knitr::kable(
+  results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5$FP_Power_avg,
+  caption = "Mean False Positive Rates and Power: X1k_B6_BV012025",
+  digits = 4
+)
+
+knitr::kable(
+  results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5$FP_Power_sd,
+  caption = "SD False Positive Rates and Power: X1k_B6_BV012025",
+  digits = 4
+)
+
+knitr::kable(
+  results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5$FP_Power_med,
+  caption = "Median False Positive Rates and Power: X1k_B6_BV012025",
+  digits = 4
+)
+
+knitr::kable(
+  results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5$FP_Power_iqr,
+  caption = "IQR False Positive Rates and Power: X1k_B6_BV012025",
+  digits = 4
+)
+
+ggplot(data = results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5$pr_param_df, 
+       mapping = aes(x = x.label, 
+                     y = Probability,
+                     color = Relevance)) +
+  geom_point(alpha = 0.75) +
+  facet_wrap(~Model)
+
+pr_param_df_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 <- results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5$pr_param_df |> 
+  group_by(Model, Relevance) |>
+  nest() |>
+  mutate(
+    Mean = map(.x = data, .f = function(x) mean(x$Probability)),
+    SD = map(.x = data, .f = function(x) sd(x$Probability))
+    ) |>
+  unnest(c(Mean, SD))
+
+relevant_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 <- results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5$pr_param_df |> filter(Relevance == "Relevant")
+
+knitr::kable(
+  data.frame(
+    Model = c("Lasso", "EN", "SSL", "SSEN"),
+    x1 = relevant_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x1") |>
+      select(Probability),
+    x51 = relevant_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x51")|>
+      select(Probability),
+    x101 = relevant_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x101")|>
+      select(Probability),
+    x151 = relevant_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x151")|>
+      select(Probability),
+    x201 = relevant_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x201")|>
+      select(Probability),
+    x251 = relevant_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x251")|>
+      select(Probability)
+  ),
+  caption = "Mean Probability of Inclusion for True Non-zero Paramters",
+  col.names = c("Model", "X1", "X51", "X101", "X151", "X201", "X251")
+)
+
+knitr::kable(
+  pr_param_df_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 |> 
+    select(-data) |>
+    arrange(Relevance),
+  caption = "Probability of Inclusion for Relevant/Irrelevant Parameters: X1k_B6_BV012025",
+  digits = 4
+)
+
+```
+
+## B6_BV012025 Summary (Reduced for Manuscript)
+
+```{r, echo=FALSE}
+results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 <- readRDS(
+  "C:/Users/cotto/Documents/Publications/multinomial models in R/simulations/results/results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5.RDS"
+)
+
+knitr::kable(
+  bind_cols(
+    results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5$model_fitness_avg |>
+    dplyr::select(model, s0, s1, deviance),
+    results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5$FP_Power_avg |>
+      select(FDP, Power)
+  ),
+  caption = "Mean Model Fitness: X1k_B6_BV012025",
+  digits = 4
+)
+
+# xtable::xtable(
+#   bind_cols(
+#     results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5$model_fitness_avg |>
+#     dplyr::select(model, s0, s1, deviance),
+#     results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5$FP_Power_avg |>
+#       select(FDP, Power)
+#   ),
+#   caption = "Mean Model Fitness: X1k_B6_BV012025",
+#   digits = 4
+# )
+
+pr_param_df_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 <- results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5$pr_param_df |> 
+  group_by(Model, Relevance) |>
+  nest() |>
+  mutate(
+    Mean = map(.x = data, .f = function(x) mean(x$Probability)),
+    SD = map(.x = data, .f = function(x) sd(x$Probability))
+    ) |>
+  unnest(c(Mean, SD))
+
+relevant_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 <- results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5$pr_param_df |> filter(Relevance == "Relevant")
+
+knitr::kable(
+  data.frame(
+    Model = c("Lasso", "EN", "SSL", "SSEN"),
+    x1 = relevant_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x1") |>
+      select(Probability),
+    x51 = relevant_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x51")|>
+      select(Probability),
+    x101 = relevant_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x101")|>
+      select(Probability),
+    x151 = relevant_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x151")|>
+      select(Probability),
+    x201 = relevant_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x201")|>
+      select(Probability),
+    x251 = relevant_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x251")|>
+      select(Probability)
+  ),
+  caption = "Mean Probability of Inclusion for True Non-zero Paramters",
+  col.names = c("Model", "X1", "X51", "X101", "X151", "X201", "X251")
+)
+
+# xtable::xtable(
+#   data.frame(
+#     Model = c("Lasso", "EN", "SSL", "SSEN"),
+#     x1 = relevant_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 |> 
+#       filter(x.label == "x1") |>
+#       select(Probability),
+#     x51 = relevant_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 |> 
+#       filter(x.label == "x51")|>
+#       select(Probability),
+#     x101 = relevant_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 |> 
+#       filter(x.label == "x101")|>
+#       select(Probability),
+#     x151 = relevant_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 |> 
+#       filter(x.label == "x151")|>
+#       select(Probability),
+#     x201 = relevant_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 |> 
+#       filter(x.label == "x201")|>
+#       select(Probability),
+#     x251 = relevant_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 |> 
+#       filter(x.label == "x251")|>
+#       select(Probability)
+#   ),
+#   caption = "Mean Probability of Inclusion for True Non-zero Paramters",
+#   digits = 4
+# )
+
+```
+
+## B6_B025050 Summary
+
+```{r, eval=FALSE, echo=FALSE}
+results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 <- summary_function_A(
+  files = c(
+    "results_lasso_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5.RDS",
+    "results_en_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5.RDS",
+    "results_ssl_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5.RDS",
+    "results_ssen_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5.RDS"),
+  spatial = FALSE,
+  model_names = c("Lasso", "EN", "SSL", "SSEN"),
+  p = 1000,
+  b.indices = nzl,
+  print.progress = T
+)
+
+saveRDS(
+  results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5,
+  "C:/Users/cotto/Documents/Publications/multinomial models in R/simulations/results/results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_unsmry.RDS"
+)
+
+pr_param_df_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 <- data.frame(
+  Model = c(rep("Lasso", 1000),
+            rep("EN", 1000),
+            rep("SSL", 1000),
+            rep("SSEN", 1000)),
+  x.label = colnames(results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5$Prob_Included[-1]),
+  Probability = c(
+    t(results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5$Prob_Included |> filter(model == "Lasso") |>
+        select(-model)),
+    t(results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5$Prob_Included |> filter(model == "EN") |>
+        select(-model)),
+    t(results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5$Prob_Included |> filter(model == "SSL") |>
+        select(-model)),
+    t(results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5$Prob_Included |> filter(model == "SSEN") |>
+        select(-model))
+  )
+) |>
+  mutate(
+    Relevance = case_when(
+      x.label %in% tp.ns ~ "Relevant",
+      !(x.label %in% tp.ns) ~ "Irrelevant"
+    )
+  )
+
+results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5$pr_param_df <-
+  pr_param_df_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5
+
+saveRDS(
+  results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5,
+  "C:/Users/cotto/Documents/Publications/multinomial models in R/simulations/results/results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5.RDS"
+)
+```
+
+```{r, echo=FALSE}
+results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 <- readRDS(
+  "C:/Users/cotto/Documents/Publications/multinomial models in R/simulations/results/results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5.RDS"
+)
+
+knitr::kable(
+  results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5$model_fitness_avg,
+  caption = "Mean Model Fitness: X1k_B6_BV025050",
+  digits = 4
+)
+
+knitr::kable(
+  results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5$model_fitness_sd,
+  caption = "SD Model Fitness: X1k_B6_BV025050",
+  digits = 4
+)
+
+knitr::kable(
+  results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5$model_fitness_med,
+  caption = "Median Model Fitness: X1k_B6_BV025050",
+  digits = 4
+)
+
+knitr::kable(
+  results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5$model_fitness_iqr,
+  caption = "IQR Model Fitness: X1k_B6_BV025050",
+  digits = 4
+)
+
+knitr::kable(
+  results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5$FP_Power_avg,
+  caption = "Mean False Positive Rates and Power: X1k_B6_BV025050",
+  digits = 4
+)
+
+knitr::kable(
+  results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5$FP_Power_sd,
+  caption = "SD False Positive Rates and Power: X1k_B6_BV025050",
+  digits = 4
+)
+
+knitr::kable(
+  results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5$FP_Power_med,
+  caption = "Median False Positive Rates and Power: X1k_B6_BV025050",
+  digits = 4
+)
+
+knitr::kable(
+  results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5$FP_Power_iqr,
+  caption = "IQR False Positive Rates and Power: X1k_B6_BV025050",
+  digits = 4
+)
+
+pr_param_df_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 <- results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5$pr_param_df |> 
+  group_by(Model, Relevance) |>
+  nest() |>
+  mutate(
+    Mean = map(.x = data, .f = function(x) mean(x$Probability)),
+    SD = map(.x = data, .f = function(x) sd(x$Probability))
+    ) |>
+  unnest(c(Mean, SD))
+
+relevant_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 <- results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5$pr_param_df |> filter(Relevance == "Relevant")
+
+knitr::kable(
+  data.frame(
+    Model = c("Lasso", "EN", "SSL", "SSEN"),
+    x1 = relevant_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x1") |>
+      select(Probability),
+    x51 = relevant_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x51")|>
+      select(Probability),
+    x101 = relevant_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x101")|>
+      select(Probability),
+    x151 = relevant_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x151")|>
+      select(Probability),
+    x201 = relevant_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x201")|>
+      select(Probability),
+    x251 = relevant_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x251")|>
+      select(Probability)
+  ),
+  caption = "Mean Probability of Inclusion for True Non-zero Paramters",
+  col.names = c("Model", "X1", "X51", "X101", "X151", "X201", "X251")
+)
+
+
+knitr::kable(
+  pr_param_df_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 |> 
+    select(-data) |>
+    arrange(Relevance),
+  caption = "Probability of Inclusion for Relevant/Irrelevant Parameters: X1k_B6_BV025050",
+  digits = 4
+)
+
+```
+
+## B6_BV025050 Summary (Reduced for Manuscript)
+
+```{r, echo=FALSE}
+results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 <- readRDS(
+  "C:/Users/cotto/Documents/Publications/multinomial models in R/simulations/results/results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5.RDS"
+)
+
+knitr::kable(
+  bind_cols(
+    results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5$model_fitness_avg |>
+    dplyr::select(model, s0, s1, deviance),
+    results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5$FP_Power_avg |>
+      select(FDP, Power)
+  ),
+  caption = "Mean Model Fitness: X1k_B6_BV025050",
+  digits = 4
+)
+
+# xtable::xtable(
+#   bind_cols(
+#     results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5$model_fitness_avg |>
+#     dplyr::select(model, s0, s1, deviance),
+#     results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5$FP_Power_avg |>
+#       select(FDP, Power)
+#   ),
+#   caption = "Mean Model Fitness: X1k_B6_BV025050",
+#   digits = 4
+# )
+
+pr_param_df_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 <- results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5$pr_param_df |> 
+  group_by(Model, Relevance) |>
+  nest() |>
+  mutate(
+    Mean = map(.x = data, .f = function(x) mean(x$Probability)),
+    SD = map(.x = data, .f = function(x) sd(x$Probability))
+    ) |>
+  unnest(c(Mean, SD))
+
+relevant_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 <- results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5$pr_param_df |> filter(Relevance == "Relevant")
+
+knitr::kable(
+  data.frame(
+    Model = c("Lasso", "EN", "SSL", "SSEN"),
+    x1 = relevant_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x1") |>
+      select(Probability),
+    x51 = relevant_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x51")|>
+      select(Probability),
+    x101 = relevant_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x101")|>
+      select(Probability),
+    x151 = relevant_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x151")|>
+      select(Probability),
+    x201 = relevant_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x201")|>
+      select(Probability),
+    x251 = relevant_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x251")|>
+      select(Probability)
+  ),
+  caption = "Mean Probability of Inclusion for True Non-zero Paramters",
+  col.names = c("Model", "X1", "X51", "X101", "X151", "X201", "X251")
+)
+
+# xtable::xtable(
+#   data.frame(
+#     Model = c("Lasso", "EN", "SSL", "SSEN"),
+#     x1 = relevant_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 |> 
+#       filter(x.label == "x1") |>
+#       select(Probability),
+#     x51 = relevant_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 |> 
+#       filter(x.label == "x51")|>
+#       select(Probability),
+#     x101 = relevant_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 |> 
+#       filter(x.label == "x101")|>
+#       select(Probability),
+#     x151 = relevant_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 |> 
+#       filter(x.label == "x151")|>
+#       select(Probability),
+#     x201 = relevant_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 |> 
+#       filter(x.label == "x201")|>
+#       select(Probability),
+#     x251 = relevant_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 |> 
+#       filter(x.label == "x251")|>
+#       select(Probability)
+#   ),
+#   caption = "Mean Probability of Inclusion for True Non-zero Paramters",
+#   digits = 4
+# )
+
+```
+
+## Summary (Reduced for Manuscript)
+
+```{r, echo=FALSE}
+tab.mf1 <- bind_cols(
+    results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5$model_fitness_avg |>
+      select(model, s0, s1, deviance),
+    results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5$FP_Power_avg |>
+      select(FDP, Power)
+  ) |>
+  mutate(scenario = "Scenario 1")
+
+tab.mf2 <- bind_cols(
+    results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5$model_fitness_avg |>
+      select(model, s0, s1, deviance),
+    results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5$FP_Power_avg |>
+      select(FDP, Power)
+  ) |>
+  mutate(scenario = "Scenario 2")
+
+tab.mf3 <- bind_cols(
+    results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5$model_fitness_avg |>
+      select(model, s0, s1, deviance),
+    results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5$FP_Power_avg |>
+      select(FDP, Power)
+  ) |>
+  mutate(scenario = "Scenario 3")
+
+knitr::kable(
+  bind_rows(
+    tab.mf1,
+    tab.mf2,
+    tab.mf3
+  ) |>
+    select(scenario, model, s0, s1, deviance, FDP, Power)
+)
+
+# xtable::xtable(
+#   bind_rows(
+#     tab1,
+#     tab2,
+#     tab3
+#   ) |>
+#     select(scenario, model, s0, s1, deviance, FDP, Power),
+#   digits = 4
+# )
+```
+
+```{r, echo=FALSE}
+tab.pr1 <- data.frame(
+    Model = c("Lasso", "EN", "SSL", "SSEN"),
+    x1 = relevant_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x1") |>
+      select(Probability),
+    x51 = relevant_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x51")|>
+      select(Probability),
+    x101 = relevant_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x101")|>
+      select(Probability),
+    x151 = relevant_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x151")|>
+      select(Probability),
+    x201 = relevant_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x201")|>
+      select(Probability),
+    x251 = relevant_grp_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x251")|>
+      select(Probability)
+  ) |> 
+  mutate(scenario = "Scenario 1")
+
+tab.pr2 <- data.frame(
+    Model = c("Lasso", "EN", "SSL", "SSEN"),
+    x1 = relevant_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x1") |>
+      select(Probability),
+    x51 = relevant_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x51")|>
+      select(Probability),
+    x101 = relevant_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x101")|>
+      select(Probability),
+    x151 = relevant_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x151")|>
+      select(Probability),
+    x201 = relevant_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x201")|>
+      select(Probability),
+    x251 = relevant_grp_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x251")|>
+      select(Probability)
+  ) |> 
+  mutate(scenario = "Scenario 2")
+
+tab.pr3 <- data.frame(
+    Model = c("Lasso", "EN", "SSL", "SSEN"),
+    x1 = relevant_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x1") |>
+      select(Probability),
+    x51 = relevant_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x51")|>
+      select(Probability),
+    x101 = relevant_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x101")|>
+      select(Probability),
+    x151 = relevant_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x151")|>
+      select(Probability),
+    x201 = relevant_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x201")|>
+      select(Probability),
+    x251 = relevant_grp_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5 |> 
+      filter(x.label == "x251")|>
+      select(Probability)
+  ) |> 
+  mutate(scenario = "Scenario 3")
+
+tab.pr <- bind_rows(
+    tab.pr1,
+    tab.pr2,
+    tab.pr3
+  )
+colnames(tab.pr) <- c("Model", "X1", "X51", "X101", "X151", "X201", "X251", "Scenario")
+
+knitr::kable(
+  tab.pr |>
+    select(Scenario, Model, X1, X51, X101, X151, X201, X251)
+)
+
+# xtable::xtable(
+#   tab.pr |>
+#     select(Scenario, Model, X1, X51, X101, X151, X201, X251),
+#   digits = 4
+# )
+```
+
+# Plots
+
+## Inclusion Probabilities
+
+```{r, echo=FALSE}
+prplot <- bind_rows(
+  results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5$pr_param_df |>
+         mutate(x.index = rep(1:1000, 4),
+                scenario = "Scenario 1"),
+  results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5$pr_param_df |>
+         mutate(x.index = rep(1:1000, 4),
+                scenario = "Scenario 2"),
+  results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5$pr_param_df |>
+         mutate(x.index = rep(1:1000, 4),
+                scenario = "Scenario 3")
+) |>
+  mutate(
+    model2 = factor(
+      case_when(
+      Model == "EN" ~ "Elastic Net",
+      Model == "Lasso" ~ "Lasso",
+      Model == "SSL" ~ "SSL",
+      Model == "SSEN" ~ "SSEN"
+    ),
+    levels = c("Lasso", "Elastic Net",
+               "SSL", "SSEN")
+    ),
+    rel2 = factor(
+      Relevance,
+      levels = c("Relevant", "Irrelevant")
+    )
+  )
+
+
+ggplot(data = prplot, 
+       mapping = aes(x = x.index, 
+                     y = Probability,
+                     color = Relevance,
+                     fill = Relevance,
+                     shape = Relevance,
+                     alpha = Relevance)) +
+  geom_point(
+    # alpha = 0.65,
+    size = 2
+    ) +
+  scale_alpha_discrete(
+    range = c(0.5, 1)
+    ) +
+  facet_grid(
+    cols = vars(model2),
+    rows = vars(scenario),
+    scales = "free_y"
+    ) +
+  scale_x_continuous(
+    name = "Predictor Index",
+    #breaks = c(1, 51, 101, 151, 201, 251, 500, 750, 1000),
+    breaks = c(1, 250, 500, 750, 1000),
+    limits = c(1, 1000)
+    ) +
+  scale_shape_manual(
+    values = c(21, 24)
+  ) +
+  scale_color_manual(
+    values = c(cbp[8], cbp[7])
+  ) +
+  scale_fill_manual(
+    values = c(cbp[9], cbp[7])
+  ) +
+  theme(plot.title = element_text(hjust = 0.5), 
+        text = element_text(size = 14),
+        legend.position = "bottom")
+
+ggplot(data = prplot, 
+       mapping = aes(x = x.index, 
+                     y = Probability,
+                     color = Relevance,
+                     fill = Relevance,
+                     shape = Relevance)) +
+  geom_point(
+    alpha = 0.65,
+    size = 2.25
+    ) +
+  facet_grid(
+    rows = vars(model2),
+    cols = vars(scenario),
+    scales = "free_y"
+    ) +
+  scale_x_continuous(
+    name = "Predictor Index",
+    #breaks = c(1, 51, 101, 151, 201, 251, 500, 750, 1000),
+    breaks = c(1, 250, 500, 750, 1000),
+    limits = c(1, 1000)
+    ) +
+  scale_shape_manual(
+    values = c(21, 22)
+  ) +
+  scale_color_manual(
+    values = c(cbp[7], cbp[8])
+  ) +
+  scale_fill_manual(
+    values = c(cbp[4], cbp[9])
+  ) +
+  theme(plot.title = element_text(hjust = 0.5), 
+        text = element_text(size = 14),
+        legend.position = "bottom")
+
+ggplot(data = prplot, 
+       mapping = aes(y = x.index, 
+                     x = Probability,
+                     color = Relevance,
+                     fill = Relevance,
+                     shape = Relevance)) +
+  geom_point(
+    # alpha = 0.65,
+    size = 2.25
+    ) +
+  facet_grid(
+    rows = vars(model2),
+    cols = vars(scenario),
+    scales = "free_x"
+    ) +
+  scale_y_continuous(
+    name = "Predictor Index",
+    #breaks = c(1, 51, 101, 151, 201, 251, 500, 750, 1000),
+    breaks = c(1, 250, 500, 750, 1000),
+    limits = c(1, 1000)
+    ) +
+  scale_shape_manual(
+    values = c(21, 22)
+  ) +
+  scale_color_manual(
+    values = c(cbp[7], cbp[8])
+  ) +
+  scale_fill_manual(
+    values = c(cbp[4], cbp[9])
+  ) +
+  theme(plot.title = element_text(hjust = 0.5), 
+        text = element_text(size = 14),
+        legend.position = "bottom")
+```
+
+```{r, echo=FALSE}
+results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_unsmry <- readRDS("C:/Users/cotto/Documents/Publications/multinomial models in R/simulations/results/results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_unsmry.RDS")
+
+results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_unsmry <- readRDS("C:/Users/cotto/Documents/Publications/multinomial models in R/simulations/results/results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_unsmry.RDS")
+
+results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_unsmry <- readRDS("C:/Users/cotto/Documents/Publications/multinomial models in R/simulations/results/results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_unsmry.RDS")
+
+forplots_BV0075015 <- data.frame(
+  model = factor(
+    rep(
+      results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_unsmry$Raw_out$model, 3
+      ),
+    levels = c("Lasso", "EN", "SSL", "SSEN")
+  ),
+  measure_value = c(
+    results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_unsmry$Raw_out$FDP,
+    results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_unsmry$Raw_out$FWE,
+    results_M5000_X1k_B6_BV0075015_NTR300_NTE100_NCV5_unsmry$Raw_out$Power
+  ),
+  measure_label = c(
+    rep("FDP", 20000),
+    rep("FWE", 20000),
+    rep("Power", 20000)
+  )
+)
+
+forplots_BV012025 <- data.frame(
+  model = factor(
+    rep(
+      results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_unsmry$Raw_out$model, 3
+      ),
+    levels = c("Lasso", "EN", "SSL", "SSEN")
+  ),
+  measure_value = c(
+    results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_unsmry$Raw_out$FDP,
+    results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_unsmry$Raw_out$FWE,
+    results_M5000_X1k_B6_BV012025_NTR300_NTE100_NCV5_unsmry$Raw_out$Power
+  ),
+  measure_label = c(
+    rep("FDP", 20000),
+    rep("FWE", 20000),
+    rep("Power", 20000)
+  )
+)
+
+forplots_BV025050 <- data.frame(
+  model = factor(
+    rep(
+      results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_unsmry$Raw_out$model, 3
+      ),
+    levels = c("Lasso", "EN", "SSL", "SSEN")
+  ),
+  measure_value = c(
+    results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_unsmry$Raw_out$FDP,
+    results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_unsmry$Raw_out$FWE,
+    results_M5000_X1k_B6_BV025050_NTR300_NTE100_NCV5_unsmry$Raw_out$Power
+  ),
+  measure_label = c(
+    rep("FDP", 20000),
+    rep("FWE", 20000),
+    rep("Power", 20000)
+  )
+)
+
+forplots <- dplyr::bind_rows(
+  forplots_BV0075015 |>
+    mutate(effect = "Scenario 1"),
+  forplots_BV012025 |>
+    mutate(effect = "Scenario 2"),
+  forplots_BV025050 |>
+    mutate(effect = "Scenario 3"),
+)|>
+  mutate(
+    model2 = factor(
+      case_when(
+      model == "EN" ~ "Elastic Net",
+      model == "Lasso" ~ "Lasso",
+      model == "SSL" ~ "SSL",
+      model == "SSEN" ~ "SSEN"
+    ),
+    levels = c("Lasso", "Elastic Net",
+               "SSL", "SSEN")
+    ))
+```
+
+## FDP
+
+```{r, echo=FALSE, message=FALSE}
+fdp_center <-
+  forplots |>
+  filter(measure_label == "FDP") |>
+  group_by(effect, model2) |>
+  summarize(
+    Mean = mean(measure_value),
+    Median = median(measure_value)
+  ) |>
+  pivot_longer(
+    cols = c(Mean, Median),
+    names_to = "Center",
+    values_to = "Value")
+
+ggplot(data = forplots |>
+         filter(measure_label == "FDP"),
+       mapping = aes(x = measure_value)) +
+  geom_histogram(binwidth = 0.05,
+                 color = cbp[9],
+                 fill = cbp[4]) +
+  facet_grid(cols = vars(effect),
+             rows = vars(model2)) +
+  scale_y_continuous(name = "Frequency") +
+  scale_x_continuous(name = "FDP") +
+  geom_vline(data = fdp_center,
+             aes(xintercept = Value,
+                 color = Center,
+                 linetype = Center),
+             size = 1) +
+  scale_color_manual(values = c(cbp[2], cbp[8])) +
+  theme(plot.title = element_text(hjust = 0.5), 
+        text = element_text(size = 14),
+        legend.position = "bottom")
+
+ggplot(data = forplots |>
+         filter(measure_label == "FDP"),
+       mapping = aes(x = measure_value)) +
+  geom_boxplot(color = cbp[9],
+               fill = cbp[4]) +
+  facet_grid(cols = vars(effect),
+             rows = vars(model2),
+             scales = "free") +
+  scale_y_continuous(name = "Frequency") +
+  scale_x_continuous(name = "FDP") +
+  geom_vline(data = fdp_center,
+             aes(xintercept = Value,
+                 color = Center),
+             size = 1) +
+  scale_color_manual(values = c(cbp[2], cbp[8])) +
+  theme(plot.title = element_text(hjust = 0.5), 
+        text = element_text(size = 14),
+        legend.position = "bottom")
+```
+
+## FWE
+
+```{r, echo=FALSE, message=FALSE}
+fwe_center <-
+  forplots |>
+  filter(measure_label == "FWE") |>
+  group_by(effect, model) |>
+  summarize(
+    Mean = mean(measure_value),
+    Median = median(measure_value)
+  ) |>
+  pivot_longer(
+    cols = c(Mean, Median),
+    names_to = "Center",
+    values_to = "Value")
+
+ggplot(data = forplots |>
+         filter(measure_label == "FWE"),
+       mapping = aes(x = measure_value)) +
+  geom_histogram(binwidth = 0.10,
+                 color = cbp[9],
+                 fill = cbp[4]) +
+  facet_grid(rows = vars(effect),
+             cols = vars(model)) +
+  scale_y_continuous(name = "Frequency") +
+  scale_x_continuous(name = "FWE") +
+  geom_vline(data = fwe_center,
+             aes(xintercept = Value,
+                 color = Center),
+             size = 1) +
+  scale_color_manual(values = c(cbp[2], cbp[8]))
+```
+
+## Power
+
+```{r, echo=FALSE, message=FALSE}
+power_center <-
+  forplots |>
+  filter(measure_label == "Power") |>
+  group_by(effect, model2) |>
+  summarize(
+    Mean = mean(measure_value),
+    Median = median(measure_value)
+  ) |>
+  pivot_longer(
+    cols = c(Mean, Median),
+    names_to = "Center",
+    values_to = "Value") 
+
+ggplot(data = forplots |>
+         filter(measure_label == "Power"),
+       mapping = aes(x = measure_value)) +
+  geom_histogram(bins = 7,
+                 color = cbp[9],
+                 fill = cbp[4]) +
+  facet_grid(cols = vars(effect),
+             rows = vars(model2)) +
+  scale_y_continuous(name = "Frequency") +
+  scale_x_continuous(name = "Proportion of Relevant Predictors Identified",
+                     breaks = c(0, 0.25, 0.5, 0.75, 1)) +
+  geom_vline(data = power_center,
+             aes(xintercept = Value,
+                 color = Center,
+                 linetype = Center),
+             size = 1) +
+  scale_color_manual(values = c(cbp[2], cbp[8])) +
+  theme(plot.title = element_text(hjust = 0.5), 
+        text = element_text(size = 14),
+        legend.position = "bottom")
+
+ggplot(data = forplots |>
+         filter(measure_label == "Power"),
+       mapping = aes(x = measure_value)) +
+  geom_boxplot(color = cbp[9],
+               fill = cbp[4]) +
+  facet_grid(cols = vars(effect),
+             rows = vars(model2)) +
+  scale_y_continuous(name = "Frequency") +
+  scale_x_continuous(name = "Proportion of Relevant Predictors Identified",
+                     breaks = c(0, 0.25, 0.5, 0.75, 1)) +
+  geom_vline(data = power_center,
+             aes(xintercept = Value,
+                 color = Center),
+             size = 1) +
+  scale_color_manual(values = c(cbp[2], cbp[8])) +
+  theme(plot.title = element_text(hjust = 0.5), 
+        text = element_text(size = 14),
+        legend.position = "bottom")
+
+
+```
+
+
+
