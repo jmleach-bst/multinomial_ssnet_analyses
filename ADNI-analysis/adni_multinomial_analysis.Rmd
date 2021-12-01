@@ -1,0 +1,653 @@
+---
+title: 'ADNI Analysis: Multinomial Models'
+author: "Justin M. Leach"
+header-includes:
+  - \usepackage{amsmath}
+  - \usepackage{bm}
+  - \usepackage{hyperref}
+  - \hypersetup{colorlinks=true, linkcolor=blue, filecolor=magenta, urlcolor=cyan, citecolor=red}
+  - \DeclareMathOperator{\diag}{diag}
+  - \DeclareMathOperator{\E}{E}
+  - \DeclareMathOperator{\var}{var}
+  - \DeclareMathOperator{\logit}{logit}
+  - \DeclareMathOperator{\PPV}{PPV}
+  - \DeclareMathOperator{\SN}{SN}
+  - \DeclareMathOperator{\F}{F}
+output:
+  pdf_document:
+    number_sections: true
+    keep_tex: true
+    citation_package: natbib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+This file contains analyses for ADNI data using multinomial models. The data analyses utilizes the `R` package `ssnet` version 0.2.0, which is available at \url{https://github.com/jmleach-bst/ssnet}. The version used is 0.0.0.9000; the primary dependencies are `BhGLM` (version 1.1.0) and `rstan` (version 2.19.2). You may also need `sim2Dpredictr` (version 0.1.0), which is available at \url{https://github.com/jmleach-bst/sim2Dpredictr}.
+
+<!-- The analyses were performed using research computing at the University of Alabama at Birmingham (Cheaha). Within the same folder you used to open this current Rmd file you can find `R` scripts contained in the folder "Rcode_analyses_cheaha" and shell scripts needed to run the jobs on slurm in the folder "scripts_analyses_cheaha". Note that these files cannot be used without edit to reproduce the analyses; you'll need to ensure the code in each file specifies the correct directories (you have to choose these!) for accessing data (wherever you've saved it!) and saving results (wherever you want it!). Windows can be somewhat difficult about opening the shell scripts, so you may want to use the "Open With" option and choose your editor of choice (I like Notepad++, but use whatever works for you). If you would rather not re-run all the files, the results are found in the "results_analyses_cheaha" folder.  -->
+
+You need to load the following packages:
+
+```{r, message=FALSE}
+library(tidyverse)
+library(sim2Dpredictr)
+library(BhGLM)
+library(rstan)
+rstan_options(auto_write = TRUE)
+library(ssnet)
+```
+
+Here we load the data and remove observations with missing measures.
+
+```{r}
+# tau data
+tau_bl <- readRDS("C:/Users/cotto/Documents/Publications/multinomial models in R/ADNI-analyses/data/tau_bl.rds")
+
+# obtain necessary data
+rm.unknown <- c("CTX_LH_UNKNOWN_SUVR", "CTX_RH_UNKNOWN_SUVR")
+tau_bl <- tau_bl[ , !(names(tau_bl) %in% rm.unknown)]
+
+x_tau_bl <- 0.2 * scale(as.matrix(
+  tau_bl[, grep("CTX.*", 
+                  names(tau_bl),
+                  perl = TRUE)]))
+
+y_tau_bl <- factor(tau_bl$DIAGNOSIS)
+
+# remove missing observations
+for (i in 1:nrow(x_tau_bl)) {
+  if (any(is.na(x_tau_bl[i,]))) {
+    cat("Observation(s) ", i, "has missing x measures. \n")
+  }
+}
+
+cat("Observation(s) ", which(is.na(y_tau_bl)), " are missing y measures. \n")
+
+x_tau_bl <- x_tau_bl[-c(265, 358), ]
+y_tau_bl <- y_tau_bl[-c(265, 358)]
+
+# cortical thickness data
+thick_sc <- readRDS("C:/Users/cotto/Documents/Publications/multinomial models in R/ADNI-analyses/data/thick_sc.rds")
+x_thick_sc <- 0.2 * scale(as.matrix(thick_sc[, grep("ST.*", names(thick_sc), perl = TRUE)]))
+y_thick_sc <- factor(thick_sc$DIAGNOSIS)
+
+# remove missing observations (none for CT)
+# for (i in 1:nrow(x_thick_sc)) {
+#   if (any(is.na(x_thick_sc[i,]))) {
+#     cat("Observation ", i, "has missing measures. \n")
+#   }
+# }
+# 
+# which(is.na(y_thick_sc))
+```
+
+# Summary
+
+```{r, echo=FALSE}
+y_t <- data.frame(rbind(
+  table(y_tau_bl),
+  table(y_thick_sc)
+))
+
+y_pt <- data.frame(rbind(
+  prop.table(table(y_tau_bl)),
+  prop.table(table(y_thick_sc))
+))
+
+y_pt <- round(y_pt, 4)
+
+y_tpt <- data.frame(
+  CN_Freq = y_t$CN,
+  CN_Perc = y_pt$CN,
+  MCI_Freq = y_t$MCI,
+  MCI_Perc = y_pt$MCI,
+  Dementia_Freq = y_t$Dementia,
+  Dementia_Perc = y_pt$Dementia
+)
+
+rownames(y_tpt) <- c("Cortical Thickness", "Tau PET")
+
+knitr::kable(
+  y_tpt
+)
+
+#xtable::xtable(y_tpt, digits = 4)
+```
+
+# Analyses
+
+## I am not copying and pasting again. Functional programming.
+
+Okay, so there's still some copying and pasting, mainly because I do not want to run all the models at once, nor am I prepared to try some kind of crazy parallel programming trick in this instance. Nevertheless, the following function will (should?) make things less confusing. While we reproduce the functions for fitting the data here, it may be easiest to toss the analyses on a cluster for reproducing the results (the models fit pretty quickly, but not immediately; it will take a few minutes, but not a few hours). You can find the required `R` code (which is essentially the same) in the folder "Rcode_analyses_cheaha" and the corresponding scripts to run the code on Cheaha in the folder "scripts_analyses_cheaha". 
+
+```{r}
+fit_adni_mn <- function(x, y, alpha,
+                       model, fold.seed,
+                       s0 = seq(0.01, 0.2, 0.01),
+                       s1 = seq(1, 5, 1),
+                       nfolds = 5, 
+                       family = "multinomial", 
+                       type.multinomial = "grouped",
+                       iar.data = NULL,
+                       choose_lambda = FALSE # only for model = "glmnet"
+                       ) {
+  if (model == "glmnet") {
+    if (choose_lambda == TRUE) {
+      cv1 <- cv.glmnet(
+      x = x, y = y,
+      alpha = alpha, nfolds = nfolds, 
+      family = family,
+      type.multinomial = type.multinomial
+      )
+      
+      cvs <- cv_ssnet(
+      model = "glmnet",
+      x = x, y = y,
+      alpha = alpha, nfolds = nfolds, 
+      family = family,
+      type.multinomial = type.multinomial,
+      s0 = cv1$lambda,
+      s1 = cv1$lambda,
+      fold.seed = fold.seed)
+    } else {
+      cvs <- cv_ssnet(
+      model = "glmnet",
+      x = x, y = y,
+      alpha = alpha, nfolds = nfolds, 
+      family = family,
+      type.multinomial = type.multinomial,
+      s0 = s0,
+      s1 = s0,
+      fold.seed = fold.seed)
+    }
+    
+    cvs_gr <- cvs |>
+      select(-ncv.id, -alpha, -model, -fold.id) |>
+      group_by(s0) |>
+      nest() |>
+      mutate(
+        mean = map(.x = data, .f = function(x) map_df(.x = x, .f = mean, na.rm = TRUE)),
+        sd = map(.x = data, .f = function(x) map_df(.x = x, .f = sd, na.rm = TRUE))
+    )
+  } else {
+    if (model == "ss") {
+      cvs <- cv_ssnet(
+      model = model,
+      x = x, y = y,
+      alpha = alpha, nfolds = nfolds, 
+      family = family,
+      type.multinomial = type.multinomial,
+      s0 = s0,
+      s1 = s1,
+      fold.seed = fold.seed
+    )
+    }
+    if (model == "ss_iar") {
+      cvs <- cv_ssnet(
+      model = model,
+      x = x, y = y,
+      alpha = alpha, nfolds = nfolds, 
+      family = family,
+      type.multinomial = type.multinomial,
+      s0 = s0,
+      s1 = s1,
+      fold.seed = fold.seed,
+      iar.data = iar.data,
+      iar.prior = TRUE,
+      tau.prior = "none"
+    )
+    }
+    
+    cvs_gr <- cvs |>
+      select(-ncv.id, -alpha, -model, -fold.id) |>
+      group_by(s0, s1) |>
+      nest() |>
+      mutate(
+        mean = map(.x = data, .f = function(x) map_df(.x = x, .f = mean, na.rm = TRUE)),
+        sd = map(.x = data, .f = function(x) map_df(.x = x, .f = sd, na.rm = TRUE))
+    )
+  }
+  
+  cvs_gr_mean <- cvs_gr |>
+    select(-data, -sd) |>
+    unnest(mean)
+  
+  cvs_gr_sd <- cvs_gr |>
+    select(-data, -mean) |>
+    unnest(sd)
+  
+  cvs_gr_mean_opt <- cvs_gr_mean |>
+    filter(deviance == min(cvs_gr_mean$deviance))
+    
+  out <- list(
+    all_data = cvs_gr,
+    all_means = cvs_gr_mean,
+    all_sds = cvs_gr_sd,
+    best_fit = cbind(model = model, alpha = alpha, cvs_gr_mean_opt)
+  )
+}
+```
+
+## Cortical Thickness
+
+```{r, eval=FALSE}
+fit_thick_lasso <- fit_adni_mn(
+  model = "glmnet",
+  x = x_thick_sc,
+  y = y_thick_sc,
+  alpha = 1,
+  fold.seed = 7816631
+)
+
+saveRDS(fit_thick_lasso, "results/fit_mn_thick_lasso.rds")
+
+fit_thick_en <- fit_adni_mn(
+  model = "glmnet",
+  x = x_thick_sc,
+  y = y_thick_sc,
+  alpha = 0.5,
+  fold.seed = 7816631
+)
+
+saveRDS(fit_thick_en, "results/fit_mn_thick_en.rds")
+
+fit_thick_ssl <- fit_adni_mn(
+  model = "ss",
+  s0 = seq(0.01, 0.2, 0.01),
+  s1 = seq(1, 10, 1),
+  x = x_thick_sc,
+  y = y_thick_sc,
+  alpha = 1,
+  fold.seed = 7816631
+)
+
+saveRDS(fit_thick_ssl, "results/fit_mn_thick_ssl.rds")
+
+fit_thick_ssen <- fit_adni_mn(
+  model = "ss",
+  s0 = seq(0.01, 0.2, 0.01),
+  s1 = seq(1, 10, 1),
+  x = x_thick_sc,
+  y = y_thick_sc,
+  alpha = 0.5,
+  fold.seed = 7816631
+)
+
+saveRDS(fit_thick_ssen, "results/fit_mn_thick_ssen.rds")
+
+dk_nb <- readRDS("data/dk_nb.rds")
+fit_thick_ssliar <- fit_adni_mn(
+  model = "ss_iar",
+  s0 = seq(0.01, 0.2, 0.01),
+  s1 = seq(1, 10, 1),
+  x = x_thick_sc,
+  y = y_thick_sc,
+  alpha = 1,
+  fold.seed = 7816631,
+  iar.data = dk_nb
+)
+
+saveRDS(fit_thick_ssliar, "results/fit_mn_thick_ssliar.rds")
+
+dk_nb <- readRDS("data/dk_nb.rds")
+fit_thick_sseniar <- fit_adni_mn(
+  model = "ss_iar",
+  s0 = seq(0.01, 0.2, 0.01),
+  s1 = seq(1, 10, 1),
+  x = x_thick_sc,
+  y = y_thick_sc,
+  alpha = 0.5,
+  fold.seed = 7816631,
+  iar.data = dk_nb
+)
+
+saveRDS(fit_thick_sseniar, "results/fit_mn_thick_sseniar.rds")
+```
+
+## Tau PET
+
+```{r, eval=FALSE}
+fit_tau_lasso <- fit_adni_mn(
+  model = "glmnet",
+  x = x_tau_bl,
+  y = y_tau_bl,
+  alpha = 1,
+  fold.seed = 7816631,
+  s0 = seq(0.001, 0.2, 0.001)
+)
+
+saveRDS(fit_tau_lasso, "results/fit_mn_tau_lasso.rds")
+
+set.seed(7816631)
+fit_tau_en <- fit_adni_mn(
+  model = "glmnet",
+  x = x_tau_bl,
+  y = y_tau_bl,
+  alpha = 0.5,
+  fold.seed = 7816631,
+  s0 = seq(0.001, 0.2, 0.001)
+)
+
+saveRDS(fit_tau_en, "results/fit_mn_tau_en.rds")
+
+fit_tau_ssl <- fit_adni_mn(
+  model = "ss",
+  s0 = seq(0.01, 0.2, 0.01),
+  s1 = seq(1, 10, 1),
+  x = x_tau_bl,
+  y = y_tau_bl,
+  alpha = 1,
+  fold.seed = 7816631
+)
+
+saveRDS(fit_tau_ssl, "results/fit_mn_tau_ssl.rds")
+
+fit_tau_ssen <- fit_adni_mn(
+  model = "ss",
+  s0 = seq(0.01, 0.2, 0.01),
+  s1 = seq(1, 10, 1),
+  x = x_tau_bl,
+  y = y_tau_bl,
+  alpha = 0.5,
+  fold.seed = 7816631
+)
+
+saveRDS(fit_tau_ssen, "results/fit_mn_tau_ssen.rds")
+
+dk_nb <- readRDS("data/dk_nb.rds")
+fit_tau_ssliar <- fit_adni_mn(
+  model = "ss_iar",
+  s0 = seq(0.01, 0.2, 0.01),
+  s1 = seq(1, 10, 1),
+  x = x_tau_bl,
+  y = y_tau_bl,
+  alpha = 1,
+  fold.seed = 7816631,
+  iar.data = dk_nb
+)
+
+saveRDS(fit_tau_ssliar, "results/fit_mn_tau_ssliar.rds")
+
+dk_nb <- readRDS("data/dk_nb.rds")
+fit_tau_sseniar <- fit_adni_mn(
+  model = "ss_iar",
+  s0 = seq(0.01, 0.2, 0.01),
+  s1 = seq(1, 10, 1),
+  x = x_tau_bl,
+  y = y_tau_bl,
+  alpha = 0.5,
+  fold.seed = 7816631,
+  iar.data = dk_nb
+)
+
+saveRDS(fit_tau_sseniar, "results/fit_mn_tau_sseniar.rds")
+```
+
+
+# Results
+
+## Metric Definitions
+
+Here we focus on classification ability. Model evaluation is trickier for multi-class classification, because standard measures such as sensitivity, specificity, positive and negative predictive value, $F_1$, and Matthews Correlation Coefficient cannot be applied without modification. We apply several metrics described in \citet{Sokolova+Lapalme:2009}. 
+
+The average accuracy (AA) and error rate (ER) are the average per-class effectiveness and classification error, respectively:
+
+\begin{align}
+  \text{Average Accuracy} & = \frac{1}{V} \sum_{v = 1}^{V} \frac{tp_v + tn_v}{tp_v + tn_v + fp_v + fn_v} \label{eq:aa} \\
+  \text{Error Rate} & = \frac{1}{V} \sum_{v = 1}^{V} \frac{fp_v + fn_v}{tp_v + tn_v + fp_v + fn_v} \label{eq:er} 
+\end{align}
+
+where $tp_v$, $tn_v$, $fp_v$, and $fn_v$ are true positive, true negative, false positive, and false negative for class $v$. 
+
+Positive predictive value (PPV; alternatively, precision in the machine learning literature), sensitivity (SN; alternatively recall in the machine learning literature), and $F_1$ score can be averaged in one of two ways: micro- or macro-averaged. Micro-averaged values are given subscript $\mu$ and are calculated using cumulative counts of true positives, false positives, true negatives, and false negatives.
+
+\begin{align}
+  \PPV_{\mu} & = \frac{\sum_{v=1}^{V} tp_v}{\sum_{v=1}^{V} (tp_v + fp_v)} \label{eq:ppv-micro} \\
+  \SN_{\mu} & = \frac{\sum_{v=1}^{V} tp_v}{\sum_{v=1}^{V} (tp_v + fn_v)} \label{eq:sn-micro} \\
+  \F_{1,\mu} & = \frac{2\times PPV_{\mu} \times SN_{\mu}}{PPV_{\mu} \times + SN_{\mu}} \label{eq:f1-micro}
+\end{align}
+
+Macro averaged-values are given subscript $M$ and are obtained as the averages of the aforementioned values over each class.
+
+\begin{align}
+  \PPV_{M} & = \frac{1}{V} \sum_{v = 1}^{V} \frac{tp_v}{tp_v + fp_v} \label{eq:ppv-macro} \\
+  \SN_{M} & = \frac{1}{V} \sum_{v = 1}^{V} \frac{tp_v}{tp_v + fn_v} \label{eq:sn-macro} \\
+  \F_{1,M} & = \frac{2\times PPV_{M} \times SN_{M}}{PPV_{M} \times + SN_{M}} \label{eq:f1-macro}
+\end{align}
+
+Micro-averaging favors classes/categories with relatively larger proportions of subjects, while macro-averaging treats classes/categories equally. Note that micro-averaging will give the same values for PPV, $F_1$, and SN - it turns out this is not an error, e.g., see \url{https://simonhessner.de/why-are-precision-recall-and-f1-score-equal-when-using-micro-averaging-in-a-multi-class-problem/} or perhaps ``A review on multi-label learning algorithms'' (doi: 10.1109/TKDE.2013.39). 
+
+## Cortical Thickness
+
+```{r}
+fit_mn_thick_lasso <- readRDS("results/fit_mn_thick_lasso.rds")
+fit_mn_thick_en <- readRDS("results/fit_mn_thick_en.rds")
+fit_mn_thick_ssl <- readRDS("results/fit_mn_thick_ssl.rds")
+fit_mn_thick_ssen <- readRDS("results/fit_mn_thick_ssen.rds")
+fit_mn_thick_ssliar <- readRDS("results/fit_mn_thick_ssliar.rds")
+fit_mn_thick_sseniar <- readRDS("results/fit_mn_thick_sseniar.rds")
+
+fit_mn_thick <- rbind(
+    fit_mn_thick_lasso$best_fit,
+    fit_mn_thick_en$best_fit,
+    fit_mn_thick_ssl$best_fit,
+    fit_mn_thick_ssen$best_fit,
+    fit_mn_thick_ssliar$best_fit,
+    fit_mn_thick_sseniar$best_fit
+  ) |> 
+  select(-model, -alpha) 
+
+fit_mn_thick <- cbind(
+  Model = c("Lasso",
+              "EN",
+              "SSL",
+              "SSEN",
+              "SSL-IAR",
+              "SSEN-IAR"),
+  fit_mn_thick
+)
+
+knitr::kable(
+  fit_mn_thick,
+  digits = 3,
+  caption = "Model Fitness Comparison: Cortical Thickness",
+  col.names = c("Model", "s0", "s1", "Dev.",
+                "AC_avg", "PCE", "PPV_M", "SN_M", "F1_M",
+                "PPV_mu", "SN_mu", "F1_mu")
+)
+
+# xtable::xtable(
+#   fit_mn_thick |>
+#     select(-ppv_micro, -sn_micro, -f1_micro),
+#   digits = 4
+# )
+# 
+# xtable::xtable(
+#   fit_mn_thick |>
+#     select(-avg_acc, -pce, -ppv_macro, -sn_macro, -f1_macro),
+#   digits = 4
+# )
+
+# xtable::xtable(
+#   fit_mn_thick |>
+#     select(-ppv_macro, -sn_macro, -f1_macro,
+#            -ppv_micro, -sn_micro, -f1_micro),
+#   digits = 4
+# )
+# 
+# xtable::xtable(
+#   fit_mn_thick |>
+#     select(-deviance, -avg_acc, -pce),
+#   digits = 4
+# )
+
+# fit_mn_thick_t <- data.frame(
+#   metrics = colnames(fit_mn_thick)[-1],
+#   Lasso = t(fit_mn_thick[1, -1]),
+#   EN = t(fit_mn_thick[2, -1]),
+#   SSL = t(fit_mn_thick[3, -1]),
+#   SSEN = t(fit_mn_thick[4, -1]),
+#   SSLIAR = t(fit_mn_thick[5, -1]),
+#   SSENIAR = t(fit_mn_thick[6, -1])
+# )
+# rownames(fit_mn_thick_t) <- NULL
+# colnames(fit_mn_thick_t) <- c("Metrics", "Lasso", "EN", "SSL", "SSEN", "SSLIAR", "SSENIAR")
+# 
+# knitr::kable(
+#   fit_mn_thick_t,
+#   digits = 4
+# )
+
+# xtable::xtable(
+#   fit_mn_thick_t,
+#   digits = 4
+# )
+```
+
+By default, the most ``optimal'' parameters are selected using deviance. However, we care more about say, macro $F_1$ score (F1_M), then perhaps we should see what happens if we choose parameter values with that score? We see below it doesn't make much difference. In addition, I think it is hard to justify which classification assessment to use, e.g., what's wrong with F1_mu or why not maximize SN_M? In contrast, deviance is calculated before classification and is probably more appropriate as it gives a more general assessment of model fitness before imposing any kind of classification rule.  
+
+
+```{r}
+# cvs_gr_mean_opt <- cvs_gr_mean |>
+#     filter(deviance == min(cvs_gr_mean$deviance))
+
+fit_mn_thick_f1 <- rbind(
+  cbind(model = "Lasso", fit_mn_thick_lasso$all_means |>
+    filter(f1_macro == max(fit_mn_thick_lasso$all_means$f1_macro, na.rm = TRUE))),
+  cbind(model = "EN",fit_mn_thick_en$all_means |>
+    filter(f1_macro == max(fit_mn_thick_en$all_means$f1_macro, na.rm = TRUE))),
+  cbind(model = "SSL",fit_mn_thick_ssl$all_means |>
+    filter(f1_macro == max(fit_mn_thick_ssl$all_means$f1_macro, na.rm = TRUE))),
+  cbind(model = "SSEN",fit_mn_thick_ssen$all_means |>
+    filter(f1_macro == max(fit_mn_thick_ssen$all_means$f1_macro, na.rm = TRUE))),
+  cbind(model = "SSL-IAR",fit_mn_thick_ssliar$all_means |>
+    filter(f1_macro == max(fit_mn_thick_ssliar$all_means$f1_macro, na.rm = TRUE))),
+  cbind(model = "SSEN-IAR",fit_mn_thick_sseniar$all_means |>
+    filter(f1_macro == max(fit_mn_thick_sseniar$all_means$f1_macro, na.rm = TRUE)))
+)
+
+# fit_mn_thick_f1 <- cbind(
+#   Model = c("Lasso",
+#               "EN",
+#               "SSL",
+#               "SSEN",
+#               "SSL-IAR",
+#               "SSEN-IAR"),
+#   fit_mn_thick_f1
+# )
+
+knitr::kable(
+  fit_mn_thick_f1,
+  digits = 3,
+  caption = "Model Fitness Comparison (Selected by F1_M): Cortical Thickness",
+  col.names = c("Model", "s0", "s1", "Dev.",
+                "AC_avg", "PCE", "PPV_M", "SN_M", "F1_M",
+                "PPV_mu", "SN_mu", "F1_mu")
+)
+```
+
+## Tau PET
+
+```{r}
+fit_mn_tau_lasso <- readRDS("results/fit_mn_tau_lasso.rds")
+fit_mn_tau_en <- readRDS("results/fit_mn_tau_en.rds")
+fit_mn_tau_ssl <- readRDS("results/fit_mn_tau_ssl.rds")
+fit_mn_tau_ssen <- readRDS("results/fit_mn_tau_ssen.rds")
+fit_mn_tau_ssliar <- readRDS("results/fit_mn_tau_ssliar.rds")
+fit_mn_tau_sseniar <- readRDS("results/fit_mn_tau_sseniar.rds")
+
+fit_mn_tau <- rbind(
+    fit_mn_tau_lasso$best_fit,
+    fit_mn_tau_en$best_fit,
+    fit_mn_tau_ssl$best_fit,
+    fit_mn_tau_ssen$best_fit,
+    fit_mn_tau_ssliar$best_fit,
+    fit_mn_tau_sseniar$best_fit
+  ) |> 
+  select(-model, -alpha) 
+
+fit_mn_tau <- cbind(
+  Model = c("Lasso",
+              "EN",
+              "SSL",
+              "SSEN",
+              "SSL-IAR",
+              "SSEN-IAR"),
+  fit_mn_tau
+)
+
+knitr::kable(
+  fit_mn_tau,
+  digits = 3,
+  caption = "Model Fitness Comparison: Tau PET",
+  col.names = c("Model", "s0", "s1", "Dev.",
+                "AC_avg", "PCE", "PPV_M", "SN_M", "F1_M",
+                "PPV_mu", "SN_mu", "F1_mu")
+)
+
+# xtable::xtable(
+#   fit_mn_tau,
+#   digits = 3
+# )
+
+# xtable::xtable(
+#   fit_mn_tau |>
+#     select(-ppv_micro, -sn_micro, -f1_micro),
+#   digits = 4
+# )
+# 
+# xtable::xtable(
+#   fit_mn_tau |>
+#     select(-avg_acc, -pce, -ppv_macro, -sn_macro, -f1_macro),
+#   digits = 4
+# )
+
+# xtable::xtable(
+#   fit_mn_tau |>
+#     select(-ppv_macro, -sn_macro, -f1_macro,
+#            -ppv_micro, -sn_micro, -f1_micro),
+#   digits = 4
+# )
+# 
+# xtable::xtable(
+#   fit_mn_tau |>
+#     select(-deviance, -avg_acc, -pce),
+#   digits = 4
+# )
+
+# fit_mn_tau_t <- data.frame(
+#   metrics = colnames(fit_mn_tau)[-1],
+#   Lasso = t(fit_mn_tau[1, -1]),
+#   EN = t(fit_mn_tau[2, -1]),
+#   SSL = t(fit_mn_tau[3, -1]),
+#   SSEN = t(fit_mn_tau[4, -1]),
+#   SSLIAR = t(fit_mn_tau[5, -1]),
+#   SSENIAR = t(fit_mn_tau[6, -1])
+# )
+# rownames(fit_mn_tau_t) <- NULL
+# colnames(fit_mn_tau_t) <- c("Metrics", "Lasso", "EN", "SSL", "SSEN", "SSLIAR", "SSENIAR")
+# 
+# knitr::kable(
+#   fit_mn_tau_t,
+#   digits = 4
+# )
+
+# xtable::xtable(
+#   fit_mn_tau_t,
+#   digits = 4
+# )
+```
+
+
+
+
+
+
+
+
+
+
